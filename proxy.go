@@ -12,21 +12,33 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type OnRequestFunc func(req *http.Request) (*http.Request, *http.Response)
+
+type OnResponseFunc func(resp *http.Response) *http.Response
+
+func defaultOnRequestFunc(req *http.Request) (*http.Request, *http.Response) { return req, nil }
+
+func defaultOnResponseFunc(resp *http.Response) *http.Response { return resp }
+
 func NewServer() Server {
 	srv := Server{
-		Logger: *logrus.New(),
+		Logger:         *logrus.New(),
+		onRequestFunc:  defaultOnRequestFunc,
+		onResponseFunc: defaultOnResponseFunc,
 	}
 	return srv
 }
 
 type Server struct {
-	Addr         string
-	Logger       logrus.Logger
-	listen       net.Listener
-	enTlsTunnel  bool
-	certPEM      []byte
-	privPEM      []byte
-	certificates map[string]*tls.Certificate
+	Addr           string
+	Logger         logrus.Logger
+	listen         net.Listener
+	enTlsTunnel    bool
+	certPEM        []byte
+	privPEM        []byte
+	certificates   map[string]*tls.Certificate
+	onRequestFunc  OnRequestFunc
+	onResponseFunc OnResponseFunc
 }
 
 func (srv *Server) ListenAndServe() error {
@@ -72,6 +84,10 @@ func (srv *Server) Serve(l net.Listener) error {
 		go srv.newConn(conn)
 	}
 }
+
+func (srv *Server) OnRequest(fn OnRequestFunc) { srv.onRequestFunc = fn }
+
+func (srv *Server) OnResponse(fn OnResponseFunc) { srv.onResponseFunc = fn }
 
 func (srv *Server) newConn(conn net.Conn) {
 	defer conn.Close()
@@ -182,31 +198,39 @@ func (srv *Server) tlsConn(sconn net.Conn) error {
 		return err
 	}
 
-	// Dial the destination server
-	addr = req.Host
-	_, _, err = net.SplitHostPort(addr)
-	if err != nil {
-		addr = net.JoinHostPort(addr, "443")
-	}
-	dconn, err = tls.Dial("tcp", addr, &tls.Config{})
-	if err != nil {
-		return err
-	}
+	req, resp = srv.onRequestFunc(req)
+	switch resp {
+	case nil:
+		// Dial the destination server
+		addr = req.Host
+		_, _, err = net.SplitHostPort(addr)
+		if err != nil {
+			addr = net.JoinHostPort(addr, "443")
+		}
+		dconn, err = tls.Dial("tcp", addr, &tls.Config{})
+		if err != nil {
+			return err
+		}
 
-	// Send request to destination server
-	err = req.Write(dconn)
-	if err != nil {
-		return err
-	}
+		// Send request to destination server
+		err = req.Write(dconn)
+		if err != nil {
+			return err
+		}
 
-	// Read the response of the destination server
-	resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
-	if err != nil {
-		return err
-	}
+		// Read the response of the destination server
+		resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
+		if err != nil {
+			return err
+		}
 
-	// Send response to source address
-	return resp.Write(sconn)
+		// Send response to source address
+		resp = srv.onResponseFunc(resp)
+		return resp.Write(sconn)
+	default:
+		// Send response to source address
+		return resp.Write(sconn)
+	}
 }
 
 func (srv *Server) forwardHttp(sconn net.Conn, req *http.Request) error {
@@ -215,31 +239,39 @@ func (srv *Server) forwardHttp(sconn net.Conn, req *http.Request) error {
 	var dconn net.Conn
 	var resp *http.Response
 
-	// Dial the destination server
-	addr = req.Host
-	_, _, err = net.SplitHostPort(addr)
-	if err != nil {
-		addr = net.JoinHostPort(addr, "80")
-	}
-	dconn, err = net.Dial("tcp", addr)
-	if err != nil {
-		return err
-	}
+	req, resp = srv.onRequestFunc(req)
 
-	// Send request to destination server
-	err = req.Write(dconn)
-	if err != nil {
-		return err
-	}
+	switch resp {
+	case nil:
+		// Dial the destination server
+		addr = req.Host
+		_, _, err = net.SplitHostPort(addr)
+		if err != nil {
+			addr = net.JoinHostPort(addr, "80")
+		}
+		dconn, err = net.Dial("tcp", addr)
+		if err != nil {
+			return err
+		}
 
-	// Read the response of the destination server
-	resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
-	if err != nil {
-		return err
-	}
+		// Send request to destination server
+		err = req.Write(dconn)
+		if err != nil {
+			return err
+		}
 
-	// Send response to source address
-	return resp.Write(sconn)
+		// Read the response of the destination server
+		resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
+		if err != nil {
+			return err
+		}
+
+		// Send response to source address
+		resp = srv.onResponseFunc(resp)
+		return resp.Write(sconn)
+	default:
+		return resp.Write(sconn)
+	}
 }
 
 func (srv *Server) getCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
