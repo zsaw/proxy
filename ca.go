@@ -65,25 +65,18 @@ func CreateRootCertificate(certPEM, privPEM io.Writer) error {
 	return nil
 }
 
-func CreateSubCertificate(parentCertPEM, parenprivPEM io.Reader, certPEM, privPEM io.Writer, servername string) error {
-	parentCertPEMBytes, err := io.ReadAll(parentCertPEM)
-	if err != nil {
-		return err
+func CreateSubCertificate(parentCertPEM, parentPrivPEM []byte, certPEM, privPEM io.Writer, servername string) error {
+	pemToBytes := func(data []byte) []byte {
+		p, _ := pem.Decode(data)
+		return p.Bytes
 	}
-	parentCertPEMBlock, _ := pem.Decode(parentCertPEMBytes)
 
-	parenprivPEMBytes, err := io.ReadAll(parenprivPEM)
-	if err != nil {
-		return err
-	}
-	parenprivPEMBlock, _ := pem.Decode(parenprivPEMBytes)
-
-	parentCert, err := x509.ParseCertificate(parentCertPEMBlock.Bytes)
+	parentCert, err := x509.ParseCertificate(pemToBytes(parentCertPEM))
 	if err != nil {
 		return err
 	}
 
-	parenPrivKey, err := x509.ParsePKCS1PrivateKey(parenprivPEMBlock.Bytes)
+	parenPrivKey, err := x509.ParsePKCS1PrivateKey(pemToBytes(parentPrivPEM))
 	if err != nil {
 		return err
 	}

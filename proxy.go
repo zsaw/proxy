@@ -5,49 +5,129 @@ import (
 	"bytes"
 	"crypto/tls"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
+
+	"github.com/sirupsen/logrus"
 )
 
-func srvtls(certPEM, privPEM io.Reader) {
-	conf := tls.Config{GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		subCertPEM := bytes.NewBuffer(nil)
-		subprivPEM := bytes.NewBuffer(nil)
-		CreateSubCertificate(certPEM, privPEM, subCertPEM, subprivPEM, chi.ServerName)
-		cert, err := tls.X509KeyPair(subCertPEM.Bytes(), subprivPEM.Bytes())
-		return &cert, err
-	}}
-	l, err := tls.Listen("tcp", ":443", &conf)
-	if err != nil {
-		panic(err.Error())
+func NewServer() Server {
+	srv := Server{
+		Logger: *logrus.New(),
 	}
+	return srv
+}
+
+type Server struct {
+	Addr         string
+	Logger       logrus.Logger
+	listen       net.Listener
+	enTlsTunnel  bool
+	certPEM      []byte
+	privPEM      []byte
+	certificates map[string]*tls.Certificate
+}
+
+func (srv *Server) ListenAndServe() error {
+	srv.enTlsTunnel = true
+
+	addr := srv.Addr
+	if addr == "" {
+		addr = ":8080"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	return srv.Serve(ln)
+}
+
+func (srv *Server) ListenAndServeTLS(certPEM, privPEM []byte) error {
+	srv.certPEM = certPEM
+	srv.privPEM = privPEM
+
+	addr := srv.Addr
+	if addr == "" {
+		addr = ":8080"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	return srv.Serve(ln)
+}
+
+func (srv *Server) Serve(l net.Listener) error {
+	srv.listen = l
+
 	for {
-		conn, err := l.Accept()
+		conn, err := srv.listen.Accept()
 		if err != nil {
-			log.Println(err.Error())
-			continue
+			srv.Logger.Error(err)
+			return err
 		}
-		go func(conn net.Conn) {
-			req, err := http.ReadRequest(bufio.NewReader(conn))
-			if err != nil {
-				log.Println(err.Error())
-				return
-			}
-			forward(req, conn)
-		}(conn)
+		go srv.newConn(conn)
 	}
 }
 
-func forwardtls(sconn net.Conn) {
-	dconn, err := net.Dial("tcp", "127.0.0.1:443")
+func (srv *Server) newConn(conn net.Conn) {
+	defer conn.Close()
+
+	var err error
+	var req *http.Request
+
+	// Read Request
+	req, err = http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
-		log.Println(err.Error())
+		srv.Logger.Error(err)
 		return
 	}
+
+	switch req.Method {
+	case "CONNECT":
+		switch srv.enTlsTunnel {
+		case true:
+			err = srv.tlsTunnel(conn, req)
+			if err != nil {
+				srv.Logger.Error(err)
+				return
+			}
+		case false:
+			err = srv.tlsConn(conn)
+			if err != nil {
+				srv.Logger.Error(err)
+				return
+			}
+		}
+	default:
+		err = srv.forwardHttp(conn, req)
+		if err != nil {
+			srv.Logger.Error(err.Error())
+			return
+		}
+	}
+}
+
+func (srv *Server) tlsTunnel(sconn net.Conn, req *http.Request) error {
+	var err error
+	var dconn net.Conn
+	var resp *http.Response
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	// Dial the destination server
+	dconn, err = net.Dial("tcp", req.Host)
+	if err != nil {
+		return err
+	}
 	defer dconn.Close()
-	resp := http.Response{
+
+	// Send the "Connection Established" message to the source Connection
+	resp = &http.Response{
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		StatusCode: http.StatusOK,
@@ -55,83 +135,127 @@ func forwardtls(sconn net.Conn) {
 	}
 	resp.Status = "Connection Established"
 	if err := resp.Write(sconn); err != nil {
-		log.Println(err.Error())
-		return
+		return err
 	}
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func(sconn net.Conn, dconn net.Conn) {
-		if _, err := io.Copy(dconn, sconn); err != nil {
-			log.Println(err.Error())
+
+	go func() {
+		_, err = io.Copy(dconn, sconn)
+		if err != nil {
+			srv.Logger.Error(err.Error())
 		}
 		wg.Done()
-	}(sconn, dconn)
-	go func(sconn net.Conn, dconn net.Conn) {
-		if _, err := io.Copy(sconn, dconn); err != nil {
-			log.Println(err.Error())
+	}()
+	go func() {
+		_, err = io.Copy(sconn, dconn)
+		if err != nil {
+			srv.Logger.Error(err.Error())
 		}
 		wg.Done()
-	}(sconn, dconn)
+	}()
 	wg.Wait()
+	return nil
 }
 
-func forward(req *http.Request, sconn net.Conn) {
-	addr := req.Host
-	if _, _, err := net.SplitHostPort(req.Host); err != nil {
-		addr = net.JoinHostPort(req.Host, "80")
+func (srv *Server) tlsConn(sconn net.Conn) error {
+	var err error
+	var dconn net.Conn
+	var addr string
+	var req *http.Request
+
+	// Send the "Connection Established" message to the source Connection
+	resp := &http.Response{
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
 	}
-	dconn, err := net.Dial("tcp", addr)
-	if err != nil {
-		log.Println(err.Error())
-		return
-	}
-	defer dconn.Close()
-	if err := req.Write(dconn); err != nil {
-		log.Println(err.Error())
-		return
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(dconn), req)
-	if err != nil {
-		log.Println(err.Error())
-		return
-	}
+	resp.Status = "Connection Established"
 	if err := resp.Write(sconn); err != nil {
-		log.Println(err.Error())
-		return
+		return err
 	}
-}
 
-type Config struct {
-	CertPEM io.Reader
-	PrivPEM io.Reader
-}
+	// Perform tls handshake with the source Connection
+	sconn = tls.Server(sconn, &tls.Config{GetCertificate: srv.getCertificate})
 
-func Serve(addr string, conf *Config, handler http.Handler) error {
-	go srvtls(conf.CertPEM, conf.PrivPEM)
-
-	l, err := net.Listen("tcp", ":8080")
+	req, err = http.ReadRequest(bufio.NewReader(sconn))
 	if err != nil {
 		return err
 	}
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			log.Println(err.Error())
-			continue
-		}
-		go func(conn net.Conn) {
-			defer conn.Close()
-			req, err := http.ReadRequest(bufio.NewReader(conn))
-			if err != nil {
-				log.Println(err.Error())
-				return
-			}
-			switch req.Method {
-			case "CONNECT":
-				forwardtls(conn)
-			default:
-				forward(req, conn)
-			}
-		}(conn)
+
+	// Dial the destination server
+	addr = req.Host
+	_, _, err = net.SplitHostPort(addr)
+	if err != nil {
+		addr = net.JoinHostPort(addr, "443")
 	}
+	dconn, err = tls.Dial("tcp", addr, &tls.Config{})
+	if err != nil {
+		return err
+	}
+
+	// Send request to destination server
+	err = req.Write(dconn)
+	if err != nil {
+		return err
+	}
+
+	// Read the response of the destination server
+	resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
+	if err != nil {
+		return err
+	}
+
+	// Send response to source address
+	return resp.Write(sconn)
+}
+
+func (srv *Server) forwardHttp(sconn net.Conn, req *http.Request) error {
+	var err error
+	var addr string
+	var dconn net.Conn
+	var resp *http.Response
+
+	// Dial the destination server
+	addr = req.Host
+	_, _, err = net.SplitHostPort(addr)
+	if err != nil {
+		addr = net.JoinHostPort(addr, "80")
+	}
+	dconn, err = net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	// Send request to destination server
+	err = req.Write(dconn)
+	if err != nil {
+		return err
+	}
+
+	// Read the response of the destination server
+	resp, err = http.ReadResponse(bufio.NewReader(dconn), req)
+	if err != nil {
+		return err
+	}
+
+	// Send response to source address
+	return resp.Write(sconn)
+}
+
+func (srv *Server) getCertificate(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if len(srv.certificates) < 1 {
+		srv.certificates = make(map[string]*tls.Certificate, 0)
+	}
+
+	cert, ok := srv.certificates[chi.ServerName]
+	if ok {
+		return cert, nil
+	}
+
+	subCertPEM := bytes.NewBuffer(nil)
+	subprivPEM := bytes.NewBuffer(nil)
+	CreateSubCertificate(srv.certPEM, srv.privPEM, subCertPEM, subprivPEM, chi.ServerName)
+	c, err := tls.X509KeyPair(subCertPEM.Bytes(), subprivPEM.Bytes())
+	srv.certificates[chi.ServerName] = &c
+	return &c, err
 }
