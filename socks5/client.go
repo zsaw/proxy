@@ -26,15 +26,27 @@ const (
 	IPv6
 )
 
-func NewRequest(c cmd, a atyp, addr string) (Request, error) {
-	var byts Request
-	byts = append(byts, 5, byte(c), 0, byte(a))
+type rep byte
 
+const (
+	Succeeded rep = iota
+	GeneralSocks5ServerFailure
+	ConnectionNotAllowedByRuleset
+	NetworkUnreachable
+	HostUnreachable
+	ConnectionRefused
+	TTLExpired
+	CommandNotSupported
+	AddressTypeNotSupported
+)
+
+func genAddrByAtyp(a atyp, addr string) ([]byte, error) {
+	byts := make([]byte, 0)
 	switch a {
 	case IPv4:
 		addr, err := netip.ParseAddrPort(addr)
 		if err != nil {
-			return Request{}, err
+			return nil, err
 		}
 
 		as4 := addr.Addr().As4()
@@ -62,7 +74,7 @@ func NewRequest(c cmd, a atyp, addr string) (Request, error) {
 	case Domain:
 		arr := strings.Split(addr, ":")
 		if len(arr) != 2 {
-			return Request{}, errors.New("domain format error")
+			return nil, errors.New("domain format error")
 		}
 
 		byts = append(byts, byte(len(arr[0])))
@@ -70,17 +82,24 @@ func NewRequest(c cmd, a atyp, addr string) (Request, error) {
 
 		uintp, err := strconv.ParseUint(arr[1], 10, 16)
 		if err != nil {
-			return Request{}, err
+			return nil, err
 		}
 
 		port := make([]byte, 2)
 		binary.BigEndian.PutUint16(port, uint16(uintp))
 		byts = append(byts, port...)
 	default:
-		return Request{}, errors.New("unexpected atyp")
+		return nil, errors.New("unexpected atyp")
 	}
-
 	return byts, nil
+}
+
+func NewRequest(c cmd, a atyp, addr string) (Request, error) {
+	var byts Request
+	byts = append(byts, 5, byte(c), 0, byte(a))
+	b, err := genAddrByAtyp(a, addr)
+	byts = append(byts, b...)
+	return byts, err
 }
 
 type Request []byte
@@ -100,6 +119,35 @@ func (r Request) Addr() string {
 	case Domain:
 		return fmt.Sprintf("%s:%d", r[5:5+r[4]], binary.BigEndian.Uint16(r[5+r[4]:]))
 	default:
-		return "unexpected atyp"
+		return ""
+	}
+}
+
+func NewRespone(r rep, a atyp, addr string) (Respone, error) {
+	var byts Respone
+	byts = append(byts, 5, byte(r), 0, byte(a))
+	b, err := genAddrByAtyp(a, addr)
+	byts = append(byts, b...)
+	return byts, err
+}
+
+type Respone []byte
+
+func (r Respone) AddrType() atyp { return atyp(r[3]) }
+
+func (r Respone) Addr() string {
+	switch r.AddrType() {
+	case IPv4:
+		addr := netip.AddrFrom4([4]byte{r[4], r[5], r[6], r[7]})
+		addrport := netip.AddrPortFrom(addr, binary.BigEndian.Uint16(r[8:]))
+		return addrport.String()
+	case IPv6:
+		addr := netip.AddrFrom16([16]byte{r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]})
+		addrport := netip.AddrPortFrom(addr, binary.BigEndian.Uint16(r[20:]))
+		return addrport.String()
+	case Domain:
+		return fmt.Sprintf("%s:%d", r[5:5+r[4]], binary.BigEndian.Uint16(r[5+r[4]:]))
+	default:
+		return ""
 	}
 }
