@@ -5,7 +5,7 @@ import (
 )
 
 func TestSocks5(t *testing.T) {
-	err := Listen()
+	err := ListenAndServe("")
 	if err != nil {
 		t.Error(err)
 	}

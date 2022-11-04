@@ -145,18 +145,32 @@ func connect(sconn net.Conn, a, p []byte) (err error) {
 	return err
 }
 
-func Listen() error {
-	listen, err := net.Listen("tcp", ":1080")
+func ListenAndServe(addr string) error {
+	server := &Server{Addr: addr}
+	return server.ListenAndServe()
+}
+
+type Server struct {
+	Addr string
+}
+
+func (srv *Server) ListenAndServe() error {
+	addr := srv.Addr
+	if addr == "" {
+		addr = ":1080"
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	defer listen.Close()
+	return srv.Serve(ln)
+}
 
+func (srv *Server) Serve(l net.Listener) error {
 	for {
-		conn, err := listen.Accept()
+		conn, err := l.Accept()
 		if err != nil {
-			log.Println(err.Error())
-			continue
+			return err
 		}
 		go newConn(conn)
 	}
