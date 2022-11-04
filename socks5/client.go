@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -211,5 +212,52 @@ func (r Respone) Addr() string {
 		return fmt.Sprintf("%s:%d", r[5:5+r[4]], binary.BigEndian.Uint16(r[5+r[4]:]))
 	default:
 		return ""
+	}
+}
+
+func Client(addr, dstAddr string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = conn.Write([]byte{5, 1, 0})
+	if err != nil {
+		return nil, err
+	}
+
+	msg := make([]byte, 2)
+	conn.Read(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if msg[0] != 5 {
+		return nil, errors.New("unsupported version")
+	}
+
+	switch msg[1] {
+	case 0:
+		req, err := NewRequest(Connect, IPv4, dstAddr)
+		if err != nil {
+			return nil, err
+		}
+		_, err = conn.Write(req)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := ReadRespone(conn)
+		if err != nil {
+			return nil, err
+		}
+
+		switch resp[1] {
+		case byte(Succeeded):
+			return conn, nil
+		default:
+			return nil, errors.New("unknown rep")
+		}
+	default:
+		return nil, errors.New("unsupported mthod")
 	}
 }
