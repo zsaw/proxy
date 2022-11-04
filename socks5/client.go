@@ -95,6 +95,53 @@ func genAddrByAtyp(a atyp, addr string) ([]byte, error) {
 	return byts, nil
 }
 
+func readAddrByAtyp(r io.Reader, a atyp) ([]byte, error) {
+	var byts []byte
+	var addr []byte
+	port := make([]byte, 2)
+	switch a {
+	case IPv4:
+		addr = make([]byte, 4)
+	case IPv6:
+		addr = make([]byte, 16)
+	case Domain:
+		num := make([]byte, 1)
+		_, err := r.Read(num)
+		if err != nil {
+			return nil, err
+		}
+		byts = append(byts, num...)
+		addr = make([]byte, num[0])
+	}
+
+	_, err := r.Read(addr)
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.Read(port)
+	if err != nil {
+		return nil, err
+	}
+
+	byts = append(byts, addr...)
+	byts = append(byts, port...)
+	return byts, nil
+}
+
+func ReadRequest(r io.Reader) (Request, error) {
+	req := make(Request, 4)
+	_, err := r.Read(req)
+	if err != nil {
+		return nil, err
+	}
+	byts, err := readAddrByAtyp(r, atyp(req[3]))
+	if err != nil {
+		return nil, err
+	}
+	req = append(req, byts...)
+	return req, nil
+}
+
 func NewRequest(c cmd, a atyp, addr string) (Request, error) {
 	var byts Request
 	byts = append(byts, 5, byte(c), 0, byte(a))
@@ -130,36 +177,11 @@ func ReadRespone(r io.Reader) (Respone, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var addr []byte
-	port := make([]byte, 2)
-	switch resp[3] {
-	case byte(IPv4):
-		addr = make([]byte, 4)
-	case byte(IPv6):
-		addr = make([]byte, 16)
-	case byte(Domain):
-		num := make([]byte, 1)
-		_, err = r.Read(num)
-		if err != nil {
-			return nil, err
-		}
-		resp = append(resp, num...)
-		addr = make([]byte, num[0])
-	}
-
-	_, err = r.Read(addr)
+	byts, err := readAddrByAtyp(r, atyp(resp[3]))
 	if err != nil {
 		return nil, err
 	}
-	_, err = r.Read(port)
-	if err != nil {
-		return nil, err
-	}
-
-	resp = append(resp, addr...)
-	resp = append(resp, port...)
-
+	resp = append(resp, byts...)
 	return resp, nil
 }
 
