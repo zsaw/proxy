@@ -215,13 +215,8 @@ func (r Respone) Addr() string {
 	}
 }
 
-func Client(addr, dstAddr string) (net.Conn, error) {
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = conn.Write([]byte{5, 1, 0})
+func Client(conn net.Conn, dstAddr string) (net.Conn, error) {
+	_, err := conn.Write([]byte{5, 1, 0})
 	if err != nil {
 		return nil, err
 	}
