@@ -2,7 +2,6 @@ package socks5
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"io"
 	"log"
@@ -19,7 +18,7 @@ func newConn(conn net.Conn) {
 		return
 	}
 
-	err = request(conn)
+	err = responseWriter(conn)
 	if err != nil {
 		log.Println(err.Error())
 		return
@@ -57,43 +56,38 @@ func consult(conn net.Conn) (err error) {
 	return err
 }
 
-func request(conn net.Conn) (err error) {
-	msg := make([]byte, 4)
-	_, err = conn.Read(msg)
+func responseWriter(sconn net.Conn) error {
+	req, err := ReadRequest(sconn)
 	if err != nil {
 		return err
 	}
-
-	var addr []byte
-	switch msg[3] {
-	case 1:
-		addr = make([]byte, 4)
-		_, err = conn.Read(addr)
+	switch req[1] {
+	case byte(Connect):
+		dconn, err := net.Dial("tcp", req.Addr())
 		if err != nil {
 			return err
 		}
-	case 3:
-		addr = make([]byte, msg[3])
-		_, err = conn.Read(addr)
+		resp, _ := NewRespone(Succeeded, req.AddrType(), req.Addr())
+		_, err = sconn.Write(resp)
 		if err != nil {
 			return err
 		}
-	case 4:
-		return errors.New("ipv6 is not supported")
-	}
-
-	port := make([]byte, 2)
-	_, err = conn.Read(port)
-	if err != nil {
-		return err
-	}
-
-	switch msg[1] {
-	case 1:
-		err = connect(conn, addr, port)
-		if err != nil {
-			return err
-		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			_, err = io.Copy(dconn, sconn)
+			if err != nil {
+				return
+			}
+		}()
+		go func() {
+			_, err = io.Copy(sconn, dconn)
+			if err != nil {
+				return
+			}
+		}()
+		wg.Wait()
+		return nil
 	case 2:
 		return errors.New("bind method not supported")
 	case 3:
@@ -101,48 +95,6 @@ func request(conn net.Conn) (err error) {
 	default:
 		return errors.New("unexpected cmd")
 	}
-	return nil
-}
-
-func connect(sconn net.Conn, a, p []byte) (err error) {
-	addr := net.TCPAddr{
-		IP:   a,
-		Port: int(binary.BigEndian.Uint16(p)),
-	}
-
-	dconn, err := net.Dial("tcp", addr.String())
-	if err != nil {
-		return err
-	}
-	defer dconn.Close()
-
-	msg := []byte{5, 0, 0, 1}
-	msg = append(msg, a...)
-	msg = append(msg, p...)
-	_, err = sconn.Write(msg)
-	if err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		_, err := io.Copy(dconn, sconn)
-		if err != nil {
-			log.Println(err.Error())
-		}
-		wg.Done()
-	}()
-	go func() {
-		_, err := io.Copy(sconn, dconn)
-		if err != nil {
-			log.Println(err.Error())
-		}
-		wg.Done()
-	}()
-
-	wg.Wait()
-	return err
 }
 
 func ListenAndServe(addr string) error {
