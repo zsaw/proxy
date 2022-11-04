@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -121,6 +122,45 @@ func (r Request) Addr() string {
 	default:
 		return ""
 	}
+}
+
+func ReadRespone(r io.Reader) (Respone, error) {
+	resp := make(Respone, 4)
+	_, err := r.Read(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var addr []byte
+	port := make([]byte, 2)
+	switch resp[3] {
+	case byte(IPv4):
+		addr = make([]byte, 4)
+	case byte(IPv6):
+		addr = make([]byte, 16)
+	case byte(Domain):
+		num := make([]byte, 1)
+		_, err = r.Read(num)
+		if err != nil {
+			return nil, err
+		}
+		resp = append(resp, num...)
+		addr = make([]byte, num[0])
+	}
+
+	_, err = r.Read(addr)
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.Read(port)
+	if err != nil {
+		return nil, err
+	}
+
+	resp = append(resp, addr...)
+	resp = append(resp, port...)
+
+	return resp, nil
 }
 
 func NewRespone(r rep, a atyp, addr string) (Respone, error) {
